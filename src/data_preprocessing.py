@@ -1,13 +1,12 @@
-import pandas as pd
+import pandas as pd #mports pandas library for:Reading CSV files,Data cleaning,Data preprocessing
 
 def load_and_clean_data(path):
-    # Load CSV
-    df = pd.read_csv(path)
+    df = pd.read_csv(path) #Loads CSV file into DataFrame
     
-    # Convert 'Date' column to datetime
+    # Convert 'Date' column to datetime required for time series analysis 
     df['Date'] = pd.to_datetime(df['Date'])
     
-    # Sort by date
+    # Sort by date in chronological order 
     df = df.sort_values('Date')
     
     # Fill missing values (forward fill, then backward fill if any remain)
@@ -25,7 +24,8 @@ def handle_outliers(df):
         lower_bound = Q1 - 1.5 * IQR
         upper_bound = Q3 + 1.5 * IQR
         
-        # Cap outliers at the bounds
+        # Cap outliers at the bounds as it Reduces skewness and Improve stability
+        #Replacing extreme outlier values with lower or upper boundary values instead of deleting them.
         df[col] = df[col].clip(lower=lower_bound, upper=upper_bound)
     
     return df
@@ -51,6 +51,7 @@ if __name__ == "__main__":
         outliers = df[(df[col] < Q1 - 1.5 * IQR) | (df[col] > Q3 + 1.5 * IQR)]
         print(f"{col}: {outliers.shape[0]} outliers remaining")
     
-    # Dataset is now ready
+    # Dataset is now ready 
     print("Cleaned dataset is ready to use.")
-    print(df.head())
+    print(df.shape)
+

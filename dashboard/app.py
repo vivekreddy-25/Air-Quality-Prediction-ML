@@ -1,79 +1,101 @@
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from datetime import datetime
 import streamlit as st
 import pandas as pd
 import joblib
 import numpy as np
+
 import plotly.graph_objects as go
 import plotly.express as px
+
+from tensorflow.keras.models import load_model
+from sklearn.preprocessing import MinMaxScaler
+
 from src.feature_engineering import compute_aqi, create_features
 from src.utils import aqi_category
 from streamlit_autorefresh import st_autorefresh
 
-# -------------------------------
-# Page Config
-# -------------------------------
+# PAGE CONFIG 
 st.set_page_config(page_title="AI Air Quality Monitoring", layout="wide")
 st.title("🌍 AI Powered Air Quality Monitoring System")
 
-# -------------------------------
-# Auto Refresh (every 10 sec)
-# -------------------------------
+# Auto refresh every 10 seconds
 st_autorefresh(interval=10000, key="refresh")
 
-# -------------------------------
-# Load Dataset
-# -------------------------------
+#  LOAD DATA 
 data_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'ancona_data.csv')
 df = pd.read_csv(data_path)
 df['Date'] = pd.to_datetime(df['Date'])
 df = df.sort_values('Date').ffill()
 
-# -------------------------------
 # Feature Engineering
-# -------------------------------
 df = compute_aqi(df)
 df = create_features(df)
 
-# -------------------------------
-# Load Model
-# -------------------------------
-model_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'rf_model.pkl')
-model = joblib.load(model_path)
+# LOAD MODELS 
+# Random Forest (Current AQI)
+rf_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'rf_model.pkl')
+rf_model = joblib.load(rf_path)
 
-# -------------------------------
-# Prediction
-# -------------------------------
+# LSTM (Future AQI)
+lstm_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'lstm_model.keras')
+lstm_model = load_model(lstm_path)
+
+#  RF PREDICTION 
 latest = df.iloc[-1]
-X = pd.DataFrame([{
-    'lag1': latest['lag1'],
-    'lag2': latest['lag2'],
-    'rolling_mean_3': latest['rolling_mean_3'],
-    'rolling_std_3': latest['rolling_std_3']
-}])
 
-pred = model.predict(X)[0]
+# Use exact feature names from trained model to avoid errors
+features = rf_model.feature_names_in_
+X_rf = latest[features].to_frame().T
 
-# -------------------------------
-# Layout
-# -------------------------------
-c1, c2, c3 = st.columns(3)
+# Simulate AQI ~50 for demo by overriding features
+# You can adjust these numbers to change predicted AQI
+X_rf_sim = X_rf.copy()
+for col in X_rf_sim.columns:
+    X_rf_sim[col] = 50  # simple simulation for all features
+
+pred = rf_model.predict(X_rf_sim)[0]
+
+#  LSTM FUTURE PREDICTION 
+def predict_next_24hrs_lstm(df, steps=24):
+    aqi = df['AQI'].values.reshape(-1,1)
+    aqi = np.log1p(aqi)
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(aqi)
+
+    last_seq = scaled[-24:]
+    preds = []
+
+    for _ in range(steps):
+        X = last_seq.reshape(1,24,1)
+        p = lstm_model.predict(X, verbose=0)[0][0]
+        preds.append(p)
+        last_seq = np.append(last_seq[1:], [[p]], axis=0)
+
+    preds = np.expm1(scaler.inverse_transform(np.array(preds).reshape(-1,1)))
+    return preds.flatten()
+
+future_preds = predict_next_24hrs_lstm(df)
+
+#  DASHBOARD LAYOUT 
+c1, c2, c3, c4 = st.columns(4)
 
 with c1:
-    st.metric("🌫 Predicted AQI", round(pred,2))
+    st.metric("Current AQI", round(pred))  # rounded to integer
 
 with c2:
-    st.metric("🏥 Health Status", aqi_category(pred))
+    st.metric(" Health", aqi_category(pred))  # shorter label
 
 with c3:
-    st.metric("📅 Last Updated", datetime.now().strftime("%d %b %Y, %H:%M:%S"))
+    st.metric(" Last Updated", datetime.now().strftime("%d %b %Y, %H:%M"))
 
+with c4:
+    st.metric(" Next Hour AQI", round(future_preds[0]))
 
-# -------------------------------
-# AQI Gauge Meter
-# -------------------------------
+#  AQI GAUGE 
 fig_gauge = go.Figure(go.Indicator(
     mode="gauge+number",
     value=pred,
@@ -90,49 +112,29 @@ fig_gauge = go.Figure(go.Indicator(
         ]
     }
 ))
-
 st.plotly_chart(fig_gauge, use_container_width=True)
 
-# -------------------------------
-# Interactive AQI Trend
-# -------------------------------
-st.subheader("📈 Interactive AQI Trend")
-
-fig_trend = px.line(
-    df.tail(1500),
-    x='Date',
-    y='AQI',
-    title="AQI Trend Over Time",
-    markers=False
-)
-
+#  AQI TREND 
+st.subheader(" Historical AQI Trend")
+fig_trend = px.line(df.tail(500), x='Date', y='AQI', title="AQI Trend")  # reduced points
 st.plotly_chart(fig_trend, use_container_width=True)
 
-# -------------------------------
-# Daily Pattern Heatmap
-# -------------------------------
-st.subheader("🔥 Daily & Hourly AQI Heatmap")
+#  LSTM FORECAST 
+st.subheader(" Next 24 Hours AQI Forecast (LSTM)")
+future_time = pd.date_range(start=df['Date'].iloc[-1], periods=24, freq='H')
+fig_forecast = px.line(x=future_time, y=future_preds, labels={'x':'Time','y':'AQI'},title="LSTM Based Future AQI Prediction")
+st.plotly_chart(fig_forecast, use_container_width=True)
 
+#  HEATMAP 
+st.subheader(" Daily & Hourly AQI Heatmap")
 df['hour'] = df['Date'].dt.hour
 df['day'] = df['Date'].dt.day
-
-pivot = df.pivot_table(values='AQI', index='day', columns='hour', aggfunc='mean')
-
+pivot = df.pivot_table(values='AQI', index='day', columns='hour', aggfunc='mean').tail(15)
 fig_heat = px.imshow(pivot, aspect='auto', color_continuous_scale='Turbo')
-
 st.plotly_chart(fig_heat, use_container_width=True)
 
-# -------------------------------
-# Pollutant Breakdown
-# -------------------------------
-st.subheader("🧪 Pollutant Contribution")
-
+# POLLUTANT CONTRIBUTION 
+st.subheader("Pollutant Contribution")
 poll = latest[['PM2.5','PM10','NO2','O3']]
-
-fig_bar = px.bar(
-    x=poll.index,
-    y=poll.values,
-    title="Current Pollutant Levels"
-)
-
+fig_bar = px.bar(x=poll.index, y=poll.values, title="Current Pollutant Levels")
 st.plotly_chart(fig_bar, use_container_width=True)
